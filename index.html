@@ -886,6 +886,18 @@ tr:hover td{background:#fafbff}
       <p style="font-size:12px;color:#718096;margin-bottom:8px">Notion Q1 2026 data niet zichtbaar? Klik hieronder om opnieuw te laden.</p>
       <button class="btn" style="background:#7c3aed;color:white;font-size:13px" onclick="forceReimportNotion();closeModal('settings-modal')">🔄 Herlaad Notion Q1 data</button>
     </div>
+    <div style="margin-top:16px;padding-top:14px;border-top:1px solid #e2e8f0">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:4px">☁️ Data exporteren / importeren via Drive</h3>
+      <p style="font-size:12px;color:#718096;margin-bottom:12px">Download de huidige back-up rechtstreeks uit Google Drive, of upload een JSON-bestand om de data te herstellen (wordt ook direct in Drive opgeslagen).</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn" style="background:#0ea5e9;color:white;font-size:13px" onclick="exportFromDrive()">⬇️ Download uit Drive</button>
+        <label class="btn" style="background:#10b981;color:white;font-size:13px;cursor:pointer;margin:0">
+          ⬆️ Importeer naar Drive
+          <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importToDrive(event)"/>
+        </label>
+      </div>
+      <div id="import-status" style="margin-top:8px;font-size:12px;display:none"></div>
+    </div>
     <div class="actions-row" style="margin-top:18px">
       <button class="btn btn-primary" onclick="saveSettings()">💾 Opslaan</button>
       <button class="btn btn-gray" onclick="closeModal('settings-modal')">Annuleren</button>
@@ -2789,6 +2801,104 @@ async function doSaveToDrive(){
   } catch(e){
     console.warn('Drive opslaan mislukt:',e);
     showDriveStatus('');
+  }
+}
+
+// ══════════════════════════════════════════
+//  EXPORT / IMPORT VIA DRIVE
+// ══════════════════════════════════════════
+async function exportFromDrive(){
+  const statusEl = document.getElementById('import-status');
+  function setStatus(msg, color){ statusEl.style.display='block'; statusEl.style.color=color||'#0369a1'; statusEl.textContent=msg; }
+
+  if(!driveAccessToken){
+    // Niet verbonden → lokale download als fallback
+    setStatus('⚠️ Niet verbonden met Drive — lokale export gedownload.', '#b45309');
+    const now  = new Date().toISOString();
+    const json = JSON.stringify({ expenses, kilometers, settings, shopifyData, invCounter, abonnementen, priveBoekingen, afschrijvingen, balansData, savedAt: now }, null, 2);
+    const blob = new Blob([json], { type:'application/json' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = 'admin_data_export.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return;
+  }
+
+  setStatus('☁️ Bestand ophalen uit Drive…', '#0369a1');
+  try {
+    // Zoek het bestand als we het ID nog niet hebben
+    if(!driveDataFileId){
+      const q   = encodeURIComponent("name='admin_data.json' and trashed=false");
+      const res = await fetch(
+        `https://www.googleapis.com/drive/v3/files?spaces=drive&q=${q}&fields=files(id,name)`,
+        { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+      );
+      const list = await res.json();
+      if(list.files?.length){ driveDataFileId = list.files[0].id; localStorage.setItem('adm_dfid', driveDataFileId); }
+    }
+    if(!driveDataFileId){ setStatus('⚠️ Geen admin_data.json gevonden in Drive.', '#b45309'); return; }
+
+    const dataRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${driveDataFileId}?alt=media`,
+      { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+    );
+    if(!dataRes.ok){ setStatus('❌ Download mislukt: ' + dataRes.status, '#dc2626'); return; }
+    const json = await dataRes.text();
+    const blob = new Blob([json], { type:'application/json' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    const datum = new Date().toISOString().slice(0,10);
+    a.download = `admin_data_${datum}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus('✅ Gedownload! Bestand staat in je Downloads map.', '#059669');
+  } catch(e){
+    setStatus('❌ Fout: ' + e.message, '#dc2626');
+  }
+}
+
+async function importToDrive(event){
+  const file     = event.target.files?.[0];
+  const statusEl = document.getElementById('import-status');
+  function setStatus(msg, color){ statusEl.style.display='block'; statusEl.style.color=color||'#0369a1'; statusEl.textContent=msg; }
+  // Reset het input-veld zodat dezelfde file opnieuw gekozen kan worden
+  event.target.value = '';
+  if(!file){ return; }
+
+  setStatus('📂 Bestand lezen…', '#0369a1');
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+
+    // Valideer minimale structuur
+    if(!data.expenses && !data.abonnementen){
+      setStatus('❌ Ongeldig bestand — geen herkenbare admindata gevonden.', '#dc2626'); return;
+    }
+
+    // Laad data in de app
+    if(data.expenses)      expenses       = data.expenses;
+    if(data.kilometers)    kilometers     = data.kilometers;
+    if(data.settings){     settings       = data.settings;
+      if(!settings.driveClientId) settings.driveClientId = atob('ODkwMTk3NjA2NjQxLTVwa2hyZTZ0dWNrYm4yMHIycG9wYTRrZWtvZXB1N2M5LmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t'); }
+    if(data.shopifyData)   shopifyData    = data.shopifyData;
+    if(data.invCounter)    invCounter     = data.invCounter;
+    if(data.abonnementen)  abonnementen   = data.abonnementen;
+    if(data.priveBoekingen)priveBoekingen = data.priveBoekingen;
+    if(data.afschrijvingen)afschrijvingen = data.afschrijvingen;
+    if(data.balansData)    balansData     = data.balansData;
+    persistLocal();
+    renderAll();
+
+    if(driveAccessToken){
+      setStatus('☁️ Data geladen — opslaan naar Drive…', '#0369a1');
+      await doSaveToDrive();
+      setStatus(`✅ Geïmporteerd & opgeslagen in Drive! (${data.expenses?.length||0} kosten)`, '#059669');
+    } else {
+      setStatus(`✅ Geïmporteerd in de app! (${data.expenses?.length||0} kosten) — Verbind Drive om ook daar op te slaan.`, '#059669');
+    }
+  } catch(e){
+    setStatus('❌ Fout bij inlezen: ' + e.message, '#dc2626');
   }
 }
 
