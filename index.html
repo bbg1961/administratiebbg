@@ -175,6 +175,21 @@ tr:hover td{background:#fafbff}
 .btw-total-row{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;font-weight:700;font-size:15px;background:#f0f4f8;border-top:2px solid #e2e8f0}
 .btw-total-row.afdragen{background:#fef2f2;color:#ef4444}
 .btw-total-row.ontvangen{background:#f0fdf4;color:#10b981}
+/* Klikbare BTW-regels met uitklapbare specificatie */
+.btw-line.clickable{cursor:pointer;transition:background .15s}
+.btw-line.clickable:hover{background:#eef2ff}
+.btw-line.clickable.expanded{background:#eef2ff}
+.btw-line .chevron{display:inline-block;font-size:10px;color:#7c3aed;margin-right:6px;transition:transform .2s;transform:rotate(0deg)}
+.btw-line.clickable.expanded .chevron{transform:rotate(90deg)}
+.btw-breakdown{background:#fafbfc;border-bottom:1px solid #f0f2f5;padding:10px 14px 14px 50px;font-size:12px;animation:slideDown .2s ease}
+@keyframes slideDown{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.btw-breakdown table{width:100%;border-collapse:collapse}
+.btw-breakdown th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#718096;font-weight:600;padding:5px 8px;border-bottom:1px solid #e2e8f0}
+.btw-breakdown td{padding:6px 8px;border-bottom:1px solid #f0f2f5;color:#2d3748}
+.btw-breakdown tr:last-child td{border-bottom:none}
+.btw-breakdown td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.btw-breakdown .empty-mini{color:#a0aec0;font-style:italic;padding:8px 0}
+.btw-breakdown tfoot td{font-weight:700;border-top:2px solid #e2e8f0;border-bottom:none;padding-top:8px}
 
 /* Shopify input card */
 .shopify-card{background:#f0fdf4;border:2px solid #bbf7d0;border-radius:12px;padding:18px}
@@ -560,7 +575,7 @@ tr:hover td{background:#fafbff}
     <div class="card">
       <h2>📋 Kostenoverzicht</h2>
       <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
-        <input type="text" id="ov-search" placeholder="🔍 Zoeken in kosten..." oninput="renderKostenTable()" style="flex:1;min-width:180px;padding:8px 12px;border:2px solid #e2e8f0;border-radius:8px;font-size:13px"/>
+        <input type="text" id="ov-search" placeholder="🔍 Zoeken: omschrijving, bedrag, datum..." oninput="renderKostenTable()" style="flex:1;min-width:180px;padding:8px 12px;border:2px solid #e2e8f0;border-radius:8px;font-size:13px"/>
         <select id="ov-cat" onchange="renderKostenTable()">
           <option value="">Alle categorieën</option>
           <option value="inkoop">🥄 Inkoop materiaal</option>
@@ -1255,10 +1270,34 @@ function renderKostenTable(){
   const cat    = document.getElementById('ov-cat')?.value||'';
   const month  = document.getElementById('ov-month')?.value||'';
   const search = (document.getElementById('ov-search')?.value||'').toLowerCase().trim();
-  let rows = [...expenses];
+  // Altijd chronologisch sorteren: meest recente datum bovenaan, oudste onderaan.
+  // Zo komt een nieuwe boeking uit (bijv.) januari NIET bovenaan als 'meest recent',
+  // maar netjes op zijn datumpositie.
+  let rows = [...expenses].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   if(cat)    rows = rows.filter(e=>e.cat===cat);
   if(month)  rows = rows.filter(e=>e.date&&e.date.startsWith(month));
-  if(search) rows = rows.filter(e=>(e.desc||'').toLowerCase().includes(search) || (e.cat||'').toLowerCase().includes(search) || (e.date||'').includes(search));
+  if(search){
+    // Normaliseer zoekterm: komma → punt, zodat "10,00" en "10.00" beide werken
+    const sNorm = search.replace(',', '.');
+    // Hulpfunctie: vergelijk een bedrag met de zoekterm in meerdere notaties
+    const amountMatch = (n) => {
+      if(n===undefined||n===null) return false;
+      const num = parseFloat(n);
+      if(isNaN(num)) return false;
+      const fixed = num.toFixed(2);            // bijv. "10.00"
+      const fixedComma = fixed.replace('.',','); // bijv. "10,00"
+      const plain = String(num);                 // bijv. "10"
+      return fixed.includes(sNorm) || fixedComma.includes(search) || plain.includes(sNorm);
+    };
+    rows = rows.filter(e=>
+      (e.desc||'').toLowerCase().includes(search)
+      || (e.cat||'').toLowerCase().includes(search)
+      || (e.date||'').includes(search)
+      || amountMatch(e.excl)
+      || amountMatch(e.btwAmt)
+      || amountMatch(e.incl)
+    );
+  }
   const tbody = document.getElementById('ov-tbody');
   const empty = document.getElementById('ov-empty');
   if(!tbody) return;
@@ -1547,46 +1586,89 @@ function selectQ(q){
   const sh  = getQData(btwYear, q);
   const exp = expenses.filter(e=>getY(e.date)===btwYear&&getQ(e.date)===q);
   const vb  = exp.reduce((s,e)=>s+e.btwAmt,0);
-  // Verlegd: kosten waar BTW naar jou is verlegd
-  const verlExcl = exp.filter(e=>e.btwPct==='V21').reduce((s,e)=>s+e.excl,0);
-  const verlBtw  = Math.round(verlExcl * 21) / 100;
-  const verschuldigd = sh.btw + verlBtw; // 1a btw + 2a verlegd btw
-  const voorbelasting = vb + verlBtw;     // betaalde btw + verlegd (mag je ook aftrekken)
+  // 4a: kosten uit landen buiten de EU (Shopify, Claude e.d.) – BTW verlegd naar jou
+  const buitenEuExp = exp.filter(e=>e.btwPct==='V21');
+  const buitenEuExcl = buitenEuExp.reduce((s,e)=>s+e.excl,0);
+  const buitenEuBtw  = Math.round(buitenEuExcl * 21) / 100;
+  const verschuldigd = sh.btw + buitenEuBtw; // 1a btw + 4a btw
+  const voorbelasting = vb + buitenEuBtw;     // betaalde btw + 4a btw (mag je ook aftrekken)
   const net = verschuldigd - voorbelasting;
   document.getElementById('btw-detail-label').textContent = `Q${q} ${QLABELS[q]} ${btwYear}`;
   // Render maandelijks invoer voor dit kwartaal
   renderMonthRows(q);
   const dash = n => n ? fE(n) : '–';
+
+  // ── Specificaties voor klikbare regels ──
+  // 1a: Shopify-omzet per maand
+  const breakdown1a = Q_MONTHS[q].map(m=>{
+    const d = shopifyData[mKey(btwYear,m)]||{};
+    return { label: MONTH_NAMES[m], excl: d.excl||0, btw: d.btw||0 };
+  }).filter(r=>r.excl||r.btw);
+  // 4a: kosten verlegd / buiten EU
+  const breakdown4a = [...buitenEuExp].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  // 5b: alle voorbelasting (kosten met BTW + verlegde BTW uit 4a)
+  const breakdown5b_kosten = exp.filter(e=>e.btwAmt>0).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+
+  const renderBreakdown1a = () => {
+    if(!breakdown1a.length) return `<div class="empty-mini">Nog geen Shopify-omzet ingevuld voor dit kwartaal.</div>`;
+    return `<table>
+      <thead><tr><th>Maand</th><th class="num">Omzet excl. BTW</th><th class="num">BTW 21%</th></tr></thead>
+      <tbody>${breakdown1a.map(r=>`<tr><td>${r.label}</td><td class="num">${fE(r.excl)}</td><td class="num">${fE(r.btw)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td>Totaal</td><td class="num">${fE(sh.excl)}</td><td class="num">${fE(sh.btw)}</td></tr></tfoot>
+    </table>`;
+  };
+  const renderBreakdown4a = () => {
+    if(!breakdown4a.length) return `<div class="empty-mini">Geen kosten uit landen buiten de EU in dit kwartaal.</div>`;
+    return `<table>
+      <thead><tr><th>Datum</th><th>Omschrijving</th><th class="num">Excl. BTW</th><th class="num">BTW 21%</th></tr></thead>
+      <tbody>${breakdown4a.map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''}</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(Math.round(e.excl*21)/100)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2">Totaal</td><td class="num">${fE(buitenEuExcl)}</td><td class="num">${fE(buitenEuBtw)}</td></tr></tfoot>
+    </table>`;
+  };
+  const renderBreakdown5b = () => {
+    const kostRows = breakdown5b_kosten.map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''}</td><td>${e.btwPct}%</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(e.btwAmt)}</td></tr>`).join('');
+    const verlegdRows = breakdown4a.map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''} <span style="color:#7c3aed;font-size:10px">(4a)</span></td><td>verlegd</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(Math.round(e.excl*21)/100)}</td></tr>`).join('');
+    if(!kostRows && !verlegdRows) return `<div class="empty-mini">Geen aftrekbare BTW in dit kwartaal.</div>`;
+    return `<table>
+      <thead><tr><th>Datum</th><th>Omschrijving</th><th>BTW</th><th class="num">Excl. BTW</th><th class="num">BTW-bedrag</th></tr></thead>
+      <tbody>${kostRows}${verlegdRows}</tbody>
+      <tfoot><tr><td colspan="3">Totaal voorbelasting</td><td class="num">${fE(exp.reduce((s,e)=>s+e.excl,0))}</td><td class="num">${fE(voorbelasting)}</td></tr></tfoot>
+    </table>`;
+  };
+
   document.getElementById('btw-detail').innerHTML = `
     <div class="btw-section-header">Kop kolommen: bedrag waarover BTW | BTW-bedrag</div>
     <div class="btw-section-header">1 – Prestaties binnenland (omzet uit Shopify)</div>
-    <div class="btw-line">
+    <div class="btw-line clickable" id="btw-row-1a" onclick="toggleBtwBreakdown('1a')">
       <span class="code">1a</span>
-      <span class="desc">Leveringen/diensten belast met 21%</span>
+      <span class="desc"><span class="chevron">▶</span>Leveringen/diensten belast met 21%</span>
       <span class="grondslag">${dash(sh.excl)}</span>
       <span class="tax">${dash(sh.btw)}</span>
     </div>
-    ${verlExcl ? `
-    <div class="btw-section-header">2 – Verleggingsregelingen</div>
-    <div class="btw-line">
-      <span class="code">2a</span>
-      <span class="desc">Leveringen/diensten waarbij BTW naar u is verlegd</span>
-      <span class="grondslag">${dash(verlExcl)}</span>
-      <span class="tax">${dash(verlBtw)}</span>
-    </div>` : ''}
+    <div class="btw-breakdown" id="btw-breakdown-1a" style="display:none">${renderBreakdown1a()}</div>
+    ${buitenEuExcl ? `
+    <div class="btw-section-header">4 – Prestaties uit het buitenland</div>
+    <div class="btw-line clickable" id="btw-row-4a" onclick="toggleBtwBreakdown('4a')">
+      <span class="code">4a</span>
+      <span class="desc"><span class="chevron">▶</span>Leveringen/diensten uit landen buiten de EU</span>
+      <span class="grondslag">${dash(buitenEuExcl)}</span>
+      <span class="tax">${dash(buitenEuBtw)}</span>
+    </div>
+    <div class="btw-breakdown" id="btw-breakdown-4a" style="display:none">${renderBreakdown4a()}</div>` : ''}
     <div class="btw-section-header">5 – Omzetbelasting</div>
     <div class="btw-line">
       <span class="code">5a</span>
-      <span class="desc">Verschuldigde omzetbelasting (1a${verlExcl?' + 2a':''})</span>
+      <span class="desc">Verschuldigde omzetbelasting (1a${buitenEuExcl?' + 4a':''})</span>
       <span class="grondslag"></span>
       <span class="tax">${dash(verschuldigd)}</span>
     </div>
-    <div class="btw-line">
+    <div class="btw-line clickable" id="btw-row-5b" onclick="toggleBtwBreakdown('5b')">
       <span class="code">5b</span>
-      <span class="desc">Voorbelasting (BTW op kosten${verlExcl?' + verlegd':''})</span>
+      <span class="desc"><span class="chevron">▶</span>Voorbelasting (BTW op kosten${buitenEuExcl?' + 4a':''})</span>
       <span class="grondslag"></span>
       <span class="tax">${dash(voorbelasting)}</span>
     </div>
+    <div class="btw-breakdown" id="btw-breakdown-5b" style="display:none">${renderBreakdown5b()}</div>
     <div class="btw-section-header">Overzicht</div>
     <div class="btw-line">
       <span class="code"></span>
@@ -1598,6 +1680,16 @@ function selectQ(q){
       <span>${net>0?'Totaal af te dragen':'Totaal te ontvangen'}</span>
       <span>${fE(Math.abs(net))}</span>
     </div>`;
+}
+
+// Klap een specificatie open/dicht onder een BTW-regel (1a, 4a of 5b)
+function toggleBtwBreakdown(key){
+  const row = document.getElementById('btw-row-'+key);
+  const bd  = document.getElementById('btw-breakdown-'+key);
+  if(!row || !bd) return;
+  const isOpen = bd.style.display !== 'none';
+  bd.style.display = isOpen ? 'none' : 'block';
+  row.classList.toggle('expanded', !isOpen);
 }
 
 function clearMonth(m){
