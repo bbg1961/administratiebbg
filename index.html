@@ -87,6 +87,9 @@ textarea{resize:vertical;min-height:60px}
 .progress-bar-fill{height:100%;background:#4f46e5;border-radius:2px;transition:width .3s}
 .drive-file-link{display:inline-flex;align-items:center;gap:6px;background:white;border:1px solid #86efac;border-radius:7px;padding:6px 12px;font-size:12px;color:#065f46;font-weight:600;text-decoration:none;margin-top:8px}
 .drive-file-link:hover{background:#f0fdf4}
+/* Bon herkenning */
+.ocr-status{margin-top:8px;font-size:12px;padding:8px 12px;border-radius:8px;background:#f7f8fc;border:1px solid #e2e8f0}
+.ocr-filled{background:#fefce8 !important;border-color:#facc15 !important}
 
 /* Buttons */
 .btn{padding:10px 22px;border:none;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:7px}
@@ -373,6 +376,7 @@ tr:hover td{background:#fafbff}
             </div>
             <input type="file" id="k-file" accept="image/*,application/pdf" style="display:none" onchange="handleFileUpload(event)"/>
             <input type="hidden" id="k-drive-url" value=""/>
+            <div id="ocr-status" class="ocr-status" style="display:none"></div>
             <div id="upload-progress" style="display:none" class="upload-progress">
               <span id="upload-status-text">⏳ Uploaden naar Drive...</span>
               <div class="progress-bar"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
@@ -1230,6 +1234,8 @@ function resetKostForm(){
   const zone = document.getElementById('k-zone');
   zone.className = 'upload-zone';
   zone.innerHTML = '<div class="icon">📂</div><p>Klik hier of sleep een foto van het bonnetje</p><p style="font-size:11px;margin-top:3px;color:#a0aec0">Wordt automatisch opgeslagen in Google Drive → map "Bonnetjes"</p>';
+  ocrSetStatus('');
+  ocrClearHighlights();
 }
 
 // ══════════════════════════════════════════
@@ -2690,6 +2696,7 @@ async function handleFileUpload(e) {
   zone.innerHTML = `<div class="icon">📎</div><p><strong>${file.name}</strong></p>`;
 
   doUploadToDrive(file);
+  bonHerkennen(file); // gegevens van de bon automatisch invullen
 }
 
 function retryDriveUpload() {
@@ -2800,6 +2807,306 @@ async function doAboUploadToDrive(file) {
     showToast('❌ Upload naar Drive mislukt');
   }
 }
+
+// ══════════════════════════════════════════
+//  BON HERKENNING (gratis, draait in de browser)
+//  PDF met tekst → pdf.js, foto/scan → Tesseract OCR
+// ══════════════════════════════════════════
+const OCR_PDFJS     = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
+const OCR_PDFJS_WK  = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+const OCR_TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+
+// Bekende leveranciers → nette naam, categorie en (soms) BTW-soort
+const OCR_VENDORS = [
+  { re: /mollie/i,                   name: 'Mollie',              cat: 'software' },
+  { re: /shopify/i,                  name: 'Shopify',             cat: 'software', btw: 'V21' },
+  { re: /anthropic/i,                name: 'Anthropic',           cat: 'software' },
+  { re: /canva/i,                    name: 'Canva',               cat: 'software' },
+  { re: /myparcel/i,                 name: 'MyParcel',            cat: 'verpakking' },
+  { re: /verzendsimpel/i,            name: 'Verzendsimpel',       cat: 'verpakking' },
+  { re: /\bapple\b/i,                name: 'Apple',               cat: 'apparatuur' },
+  { re: /\bdhl\b/i,                  name: 'DHL',                 cat: 'verpakking' },
+  { re: /post\s?nl/i,                name: 'PostNL',              cat: 'verpakking' },
+  { re: /bol\.com/i,                 name: 'Bol.com',             cat: 'kantoor' },
+  { re: /amazon/i,                   name: 'Amazon',              cat: 'kantoor' },
+  { re: /aliexpress/i,               name: 'AliExpress',          cat: 'inkoop' },
+  { re: /marktplaats/i,              name: 'Marktplaats',         cat: 'inkoop' },
+  { re: /webgems/i,                  name: "Ilona's Webgems",     cat: 'inkoop' },
+  { re: /tableware/i,                name: 'Tableware Amsterdam', cat: 'inkoop' },
+  { re: /kringloop/i,                name: 'Kringloop',           cat: 'inkoop' },
+  { re: /\bso low\b/i,               name: 'So Low',              cat: 'kantoor' },
+  { re: /\bhema\b/i,                 name: 'HEMA',                cat: 'kantoor' },
+  { re: /\baction\b/i,               name: 'Action',              cat: 'kantoor' },
+  { re: /\b(shell|esso|tinq|tango)\b/i, name: null,               cat: 'reiskosten' },
+  { re: /\bns\.nl\b|ov-chipkaart/i,  name: 'NS',                  cat: 'reiskosten' },
+];
+
+const OCR_MONTHS = { jan:1, januari:1, january:1, feb:2, februari:2, february:2, mrt:3, maart:3, mar:3, march:3,
+  apr:4, april:4, mei:5, may:5, jun:6, juni:6, june:6, jul:7, juli:7, july:7, aug:8, augustus:8, august:8,
+  sep:9, sept:9, september:9, okt:10, oct:10, oktober:10, october:10, nov:11, november:11, dec:12, december:12 };
+
+const ocrScriptCache = {};
+function ocrLoadScript(src) {
+  if (!ocrScriptCache[src]) {
+    ocrScriptCache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = resolve;
+      s.onerror = () => { delete ocrScriptCache[src]; reject(new Error('Kon ' + src + ' niet laden')); };
+      document.head.appendChild(s);
+    });
+  }
+  return ocrScriptCache[src];
+}
+
+let ocrWorkerPromise = null;
+function ocrGetWorker(onProgress) {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = ocrLoadScript(OCR_TESSERACT)
+      .then(() => Tesseract.createWorker(['nld', 'eng'], 1, {
+        logger: m => { if (m.status === 'recognizing text' && ocrWorkerPromise.onProgress) ocrWorkerPromise.onProgress(m.progress); }
+      }))
+      .catch(e => { ocrWorkerPromise = null; throw e; });
+  }
+  ocrWorkerPromise.onProgress = onProgress;
+  return ocrWorkerPromise;
+}
+
+// Afbeelding verkleinen + grijs maken: sneller en vaak beter leesbaar
+async function ocrPrepareImage(file) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, 2200 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+  const ctx = c.getContext('2d');
+  ctx.filter = 'grayscale(1) contrast(1.2)';
+  ctx.drawImage(bmp, 0, 0, c.width, c.height);
+  return c;
+}
+
+async function ocrImageText(source, onProgress) {
+  const worker = await ocrGetWorker(onProgress);
+  const { data } = await worker.recognize(source);
+  return data.text || '';
+}
+
+async function ocrPdfText(file, onProgress) {
+  await ocrLoadScript(OCR_PDFJS);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = OCR_PDFJS_WK;
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = '';
+  for (let p = 1; p <= Math.min(pdf.numPages, 3); p++) {
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    // Tekststukjes per regel groeperen (zelfde hoogte op de pagina)
+    const rows = [];
+    tc.items.forEach(it => {
+      if (!it.str || !it.str.trim()) return;
+      const y = it.transform[5], x = it.transform[4];
+      let row = rows.find(r => Math.abs(r.y - y) < 3);
+      if (!row) { row = { y, parts: [] }; rows.push(row); }
+      row.parts.push({ x, s: it.str });
+    });
+    rows.sort((a, b) => b.y - a.y);
+    text += rows.map(r => r.parts.sort((a, b) => a.x - b.x).map(q => q.s).join(' ')).join('\n') + '\n';
+  }
+  if (text.replace(/\s/g, '').length > 30) return text;
+  // Gescande PDF zonder tekstlaag → eerste pagina renderen en OCR'en
+  const page = await pdf.getPage(1);
+  const vp = page.getViewport({ scale: 2 });
+  const c = document.createElement('canvas');
+  c.width = vp.width; c.height = vp.height;
+  await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+  return ocrImageText(c, onProgress);
+}
+
+// "1.234,56" / "1,234.56" / "10,84" / "10.84" → getal
+function ocrParseAmount(s) {
+  s = s.replace(/[\s€]/g, '');
+  const lastComma = s.lastIndexOf(','), lastDot = s.lastIndexOf('.');
+  const dec = Math.max(lastComma, lastDot);
+  if (dec === -1) return parseFloat(s);
+  return parseFloat(s.slice(0, dec).replace(/[.,]/g, '') + '.' + s.slice(dec + 1));
+}
+
+function ocrAmountsIn(line) {
+  const re = /-?\d{1,3}(?:[.,\s]\d{3})*[.,]\d{2}(?![\d%]|\s%)|-?\d+[.,]\d{2}(?![\d%]|\s%)/g;
+  return (line.match(re) || []).map(ocrParseAmount).filter(n => !isNaN(n) && Math.abs(n) < 100000);
+}
+
+function ocrParseDate(text) {
+  const yNow = new Date().getFullYear();
+  const ok = (y, m, d) => y >= 2000 && y <= yNow + 1 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
+  const fmt = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const find = str => {
+    let m;
+    const reNum = /\b(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})\b/g;
+    while ((m = reNum.exec(str))) {
+      let y = +m[3]; if (y < 100) y += 2000;
+      if (ok(y, +m[2], +m[1])) return fmt(y, +m[2], +m[1]);
+    }
+    const reIso = /\b(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})\b/g;
+    while ((m = reIso.exec(str))) if (ok(+m[1], +m[2], +m[3])) return fmt(+m[1], +m[2], +m[3]);
+    const reTxt = /\b(\d{1,2})\s+([a-z]{3,9})\.?\s+(\d{4})\b/gi;
+    while ((m = reTxt.exec(str))) {
+      const mo = OCR_MONTHS[m[2].toLowerCase()];
+      if (mo && ok(+m[3], mo, +m[1])) return fmt(+m[3], mo, +m[1]);
+    }
+    const reTxtUS = /\b([a-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b/gi;   // "August 31, 2026"
+    while ((m = reTxtUS.exec(str))) {
+      const mo = OCR_MONTHS[m[1].toLowerCase()];
+      if (mo && ok(+m[3], mo, +m[2])) return fmt(+m[3], mo, +m[2]);
+    }
+    return null;
+  };
+  // Eerst regels met "datum"/"date" (niet vervaldatum), dan de hele tekst
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (/(factuur|invoice|bon|order)?\s*dat(um|e)/i.test(lines[i]) && !/(verval|due|lever)/i.test(lines[i])) {
+      const d = find(lines[i] + ' ' + (lines[i + 1] || ''));
+      if (d) return d;
+    }
+  }
+  return find(text);
+}
+
+function ocrAnalyse(text, fileName) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const all = text.toLowerCase();
+  const res = { date: ocrParseDate(text) };
+
+  // ── Bedragen ──
+  const pick = (test, exclude) => {
+    const out = [];
+    lines.forEach((l, i) => {
+      const low = l.toLowerCase();
+      if (!test.test(low) || (exclude && exclude.test(low))) return;
+      let a = ocrAmountsIn(l);
+      if (!a.length && lines[i + 1] && lines[i + 1].length <= 20) a = ocrAmountsIn(lines[i + 1]); // bedrag op volgende regel
+      if (a.length) out.push(a[a.length - 1]);
+    });
+    return out;
+  };
+  const inclA = pick(/(totaal|total|te betalen|amount due|amount paid|grand total|incl\.?\s*(btw|vat))/, /(sub|excl|ex\.?\s*btw|zonder|before|btw-?bedrag|vat amount|totaal btw|total vat|total tax)/);
+  const inclB = pick(/(betaald|paid|\bpin\b|bedrag|amount)/, /(sub|excl|btw|vat|tax|wisselgeld|retour)/);
+  const exclA = pick(/(subtota|excl|ex\.?\s*btw|netto|zonder btw|before tax|bedrag ex)/);
+  const btwA  = pick(/(\bbtw\b|\bvat\b|\btax\b|omzetbelasting)/, /(incl|excl|nummer|\bnr\b|number|\bid\b|identific|reg)/);
+
+  let incl = inclA.length ? Math.max(...inclA) : inclB.length ? Math.max(...inclB) : null;
+  if (incl == null) {                          // laatste redmiddel: grootste bedrag op de bon
+    const every = lines.flatMap(ocrAmountsIn).filter(n => n > 0);
+    if (every.length) incl = Math.max(...every);
+  }
+  const noemtBtw = /\b(btw|vat|tax|omzetbelasting)\b/i.test(text);
+  let excl = noemtBtw ? (exclA.find(n => incl == null || (n > 0 && n <= incl)) ?? null) : null;
+  let btw  = btwA.find(n => n > 0 && (incl == null || n < incl)) ?? null;
+
+  // ── BTW-percentage ──
+  const vendor = OCR_VENDORS.find(v => v.re.test(text));
+  let pct = null;
+  if (/verlegd|reverse[- ]charge|btw verlegd/i.test(text)) pct = 'V21';
+  else {
+    const m = all.match(/(?:btw|vat|tax)[^\n%]{0,25}?\b(21|9|0)(?:[.,]0+)?\s?%|\b(21|9|0)(?:[.,]0+)?\s?%\s*(?:btw|vat|tax)/);
+    if (m) pct = m[1] || m[2];
+  }
+  const snap = r => [21, 9, 0].find(p => Math.abs(r - p) <= 1);
+  if (incl != null && excl != null && excl < incl) {
+    btw = +(incl - excl).toFixed(2);
+    if (!pct) { const p = snap(btw / excl * 100); if (p != null) pct = String(p); }
+  } else if (incl != null && btw != null) {
+    excl = +(incl - btw).toFixed(2);
+    if (!pct) { const p = snap(btw / excl * 100); if (p != null) pct = String(p); }
+  } else if (incl == null && excl != null && btw != null) {
+    incl = +(excl + btw).toFixed(2);
+  }
+  if (!pct && vendor && vendor.btw) pct = vendor.btw;
+  if (incl != null && excl == null) {          // alleen totaal bekend → terugrekenen met percentage
+    const p = pct === 'V21' ? 0 : parseFloat(pct || '21');
+    excl = +(incl / (1 + p / 100)).toFixed(2);
+    btw  = +(incl - excl).toFixed(2);
+    if (!pct) pct = '21';
+  }
+  Object.assign(res, { incl, excl, btw: pct === 'V21' ? null : btw, pct });
+
+  // ── Omschrijving: "Leverancier - factuur: 12345" (zoals je ze al schrijft) ──
+  let name = vendor && vendor.name;
+  if (!name) {
+    name = lines.find(l => /[a-z]{3}/i.test(l) && l.length <= 40 &&
+      !/(factuur|invoice|receipt|kassabon|bon\b|datum|date|pagina|page|tel|www\.|http|@)/i.test(l));
+  }
+  const invText = text.replace(/\s*\u0000\s*/g, '-');
+  const inv = [...invText.matchAll(/(?:factuurnummer|factuur\s*(?:nr|nummer)\.?|invoice\s*(?:number|no\.?|nr\.?|#)|receipt\s*(?:number|no\.?|#)|bonnummer|ordernummer|order\s*(?:number|no\.?|#))\s*[:#]?\s*([A-Z0-9][A-Z0-9.\-\/]{3,})/gi)].find(m => /\d/.test(m[1]));
+  const MAANDEN = ['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'];
+  const periode = res.date ? MAANDEN[+res.date.slice(5, 7) - 1] + ' ' + res.date.slice(0, 4) : null;
+  res.desc = [name, inv ? 'factuur: ' + inv[1] : periode].filter(Boolean).join(' - ') ||
+             fileName.replace(/\.[^.]+$/, '');
+  res.cat = vendor ? vendor.cat : null;
+  return res;
+}
+
+function ocrSetStatus(html, color) {
+  const el = document.getElementById('ocr-status');
+  if (!el) return;
+  el.style.display = html ? 'block' : 'none';
+  el.style.color = color || '#4a5568';
+  el.innerHTML = html || '';
+}
+
+function ocrClearHighlights() {
+  document.querySelectorAll('.ocr-filled').forEach(el => el.classList.remove('ocr-filled'));
+}
+
+// Wordt aangeroepen zodra een bonnetje gekozen is (naast de Drive-upload)
+async function bonHerkennen(file) {
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+  if (!isPdf && !/^image\//.test(file.type)) return;
+  ocrClearHighlights();
+  ocrSetStatus('🔍 Bon wordt gelezen…');
+  const onProgress = p => ocrSetStatus(`🔍 Bon wordt gelezen… ${Math.round(p * 100)}%`);
+  try {
+    const text = isPdf ? await ocrPdfText(file, onProgress)
+                       : await ocrImageText(await ocrPrepareImage(file), onProgress);
+    const r = ocrAnalyse(text, file.name);
+    console.log('[BON] herkende tekst:\n' + text, r);
+
+    if (r.incl == null && !r.cat) {
+      ocrSetStatus('⚠️ Kon deze bon niet goed lezen — vul de gegevens zelf in', '#b45309');
+      return;
+    }
+    // Alleen lege velden invullen, zodat je eigen invoer nooit overschreven wordt
+    const filled = [];
+    const set = (id, val, label) => {
+      const el = document.getElementById(id);
+      if (val == null || val === '' || !el) return;
+      el.value = val; el.classList.add('ocr-filled');
+      if (label) filled.push(label);
+    };
+    const dateEl = document.getElementById('k-date');
+    if (r.date && (!dateEl.value || dateEl.value === today())) set('k-date', r.date, 'datum');
+    if (!document.getElementById('k-desc').value.trim()) set('k-desc', r.desc, 'omschrijving');
+    if (!document.getElementById('k-cat').value) set('k-cat', r.cat, 'categorie');
+    const exclEl = document.getElementById('k-excl'), inclEl = document.getElementById('k-incl');
+    if (r.incl != null && !exclEl.value && !inclEl.value) {
+      set('k-btwpct', r.pct, 'BTW %');
+      set('k-incl', r.incl.toFixed(2), 'bedrag');
+      set('k-excl', r.excl.toFixed(2));
+      set('k-btwamt', r.btw != null && r.btw ? r.btw.toFixed(2) : '');
+    }
+    if (filled.length) {
+      ocrSetStatus(`✨ Automatisch ingevuld: ${filled.join(', ')} — <strong>controleer even of het klopt</strong>`, '#065f46');
+    } else if (r.incl == null) {
+      ocrSetStatus('⚠️ Kon geen bedragen op de bon vinden — vul ze zelf in', '#b45309');
+    } else {
+      ocrSetStatus('');
+    }
+  } catch (err) {
+    console.warn('Bon herkennen mislukt:', err);
+    ocrSetStatus('⚠️ Bon kon niet automatisch gelezen worden — vul de gegevens zelf in', '#b45309');
+  }
+}
+
+// Gele markering weg zodra je een automatisch ingevuld veld zelf aanpast
+document.addEventListener('input', e => e.target.classList && e.target.classList.remove('ocr-filled'));
+document.addEventListener('change', e => e.target.classList && e.target.classList.remove('ocr-filled'));
 
 async function findOrCreateFolder(name, parentId = null) {
   let q = `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
