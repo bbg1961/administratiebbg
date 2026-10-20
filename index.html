@@ -1139,7 +1139,7 @@ function catClass(c){ return'cat-'+(c||'overig'); }
 function updateStats(){
   const yr=curY(), q=curQ();
   const inQ = d => getY(d)===yr && getQ(d)===q;
-  const kostenQ  = expenses.filter(e=>inQ(e.date)).reduce((s,e)=>s+e.excl,0);
+  const kostenQ  = expenses.filter(e=>inQ(e.date)&&isKost(e)).reduce((s,e)=>s+e.excl,0) + afschrInPeriode(yr,[q]);
   const omzetQ   = getQData(yr, q).excl;
   const winstQ   = omzetQ - kostenQ;
   const kmVergYr = kilometers.filter(k=>getY(k.date)===yr).reduce((s,k)=>s+k.verg,0);
@@ -1149,6 +1149,30 @@ function updateStats(){
   winstEl.textContent = fE(winstQ);
   winstEl.style.color = winstQ >= 0 ? '#10b981' : '#ef4444';
   document.getElementById('s-kmverg').textContent = fE(kmVergYr);
+}
+
+// Investering (bv. laptop ≥ €450): BTW wel in de aangifte, maar voor de winst telt alleen de afschrijving
+function isKost(e){ return !e.investering; }
+// Afschrijving in een periode: maandbedrag vanaf de aanschafmaand, gedurende de termijn
+function afschrInPeriode(yr, qs){
+  let tot = 0;
+  afschrijvingen.forEach(a => {
+    const perMaand = (a.waarde - (a.rest||0)) / (a.termijn * 12);
+    const start = getY(a.date) * 12 + (parseInt(a.date.split('-')[1]) - 1);
+    qs.forEach(q => { for (let m = (q-1)*3; m < q*3; m++) {
+      const idx = yr * 12 + m;
+      if (idx >= start && idx < start + a.termijn * 12) tot += perMaand;
+    }});
+  });
+  return Math.round(tot * 100) / 100;
+}
+
+// Boekwaarde aan het eind van een jaar (per maand afgeschreven vanaf de aanschafmaand)
+function boekwaardeEind(a, yr){
+  const perMaand = (a.waarde - (a.rest||0)) / (a.termijn * 12);
+  const start = getY(a.date) * 12 + (parseInt(a.date.split('-')[1]) - 1);
+  const maanden = Math.min(a.termijn * 12, Math.max(0, yr * 12 + 12 - start));
+  return Math.max(a.rest||0, a.waarde - perMaand * maanden);
 }
 
 // Verlegde BTW: V21 = van buiten de EU (rubriek 4a), V21EU = van binnen de EU (rubriek 4b)
@@ -1341,7 +1365,7 @@ function renderKostenTable(){
     <tr${selectedIds.has(e.id)?' style="background:#ebf5ff"':''}>
       <td><input type="checkbox" class="row-check" data-id="${e.id}" ${selectedIds.has(e.id)?'checked':''} onchange="toggleRow(${e.id},this.checked)"/></td>
       <td style="white-space:nowrap">${fD(e.date)}</td>
-      <td>${e.desc}${e.btwQ?` <span title="BTW meegenomen in aangifte ${btwQLabel(e.btwQ)}" style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:5px;padding:1px 6px;white-space:nowrap">BTW → ${btwQLabel(e.btwQ)}</span>`:''}</td>
+      <td>${e.desc}${e.investering?` <span title="Investering: telt via afschrijving (IB / Balans) mee in de winst" style="font-size:10px;background:#e0f2fe;color:#0369a1;border-radius:5px;padding:1px 6px;white-space:nowrap">investering</span>`:''}${e.btwQ?` <span title="BTW meegenomen in aangifte ${btwQLabel(e.btwQ)}" style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:5px;padding:1px 6px;white-space:nowrap">BTW → ${btwQLabel(e.btwQ)}</span>`:''}</td>
       <td><span class="badge ${catClass(e.cat)}">${catLabel(e.cat)}</span></td>
       <td>${fE(e.excl)}</td>
       <td>${isVerlegd(e.btwPct)?'Verlegd 21':e.btwPct}%</td>
@@ -1452,6 +1476,7 @@ function openDetail(id){
   document.getElementById('dm-body').innerHTML = `
     <div class="detail-row"><span class="key">Datum</span><span class="val">${fD(e.date)}</span></div>
     <div class="detail-row"><span class="key">Categorie</span><span class="val">${catLabel(e.cat)}</span></div>
+    ${e.investering?`<div class="detail-row"><span class="key">Investering</span><span class="val">Afgeschreven via IB / Balans</span></div>`:''}
     ${e.btwQ?`<div class="detail-row"><span class="key">BTW in aangifte</span><span class="val">${btwQLabel(e.btwQ)}</span></div>`:''}
     <div class="detail-row"><span class="key">Excl. BTW</span><span class="val">${fE(e.excl)}</span></div>
     <div class="detail-row"><span class="key">BTW (${isVerlegd(e.btwPct)?'Verlegd 21':e.btwPct}%)</span><span class="val">${isVerlegd(e.btwPct)?'verlegd':fE(e.btwAmt)}</span></div>
@@ -1890,12 +1915,13 @@ function renderJaar(){
   const exp = expenses.filter(e=>inScope(e.date));
   const km  = kilometers.filter(k=>inScope(k.date));
 
-  const kostenExcl= exp.reduce((s,e)=>s+e.excl,0);
+  const kostenExcl= exp.filter(isKost).reduce((s,e)=>s+e.excl,0);
+  const afschr    = afschrInPeriode(yr, qs);
   const vb        = exp.reduce((s,e)=>s+e.btwAmt,0);
   const verlExclJr= exp.filter(e=>isVerlegd(e.btwPct)).reduce((s,e)=>s+e.excl,0);
   const verlBtwJr = Math.round(verlExclJr * 21) / 100;
   const kmVerg    = km.reduce((s,k)=>s+k.verg,0);
-  const totKosten = kostenExcl+kmVerg;
+  const totKosten = kostenExcl+kmVerg+afschr;
 
   // Shopify omzet (gesommeerd per kwartaal uit maandgegevens)
   const shTotExcl = qs.reduce((s,q)=>s+getQData(yr,q).excl,0);
@@ -1905,7 +1931,7 @@ function renderJaar(){
   const btwSaldo= (shTotBTW + verlBtwJr) - (vb + verlBtwJr);
 
   const kByCat = {};
-  exp.forEach(e=>{kByCat[e.cat]=(kByCat[e.cat]||0)+e.excl;});
+  exp.filter(isKost).forEach(e=>{kByCat[e.cat]=(kByCat[e.cat]||0)+e.excl;});
 
   document.getElementById('jaar-content').innerHTML=`
     <div class="jaar-grid">
@@ -1918,6 +1944,7 @@ function renderJaar(){
         <h3>➖ Kosten</h3>
         <div class="jaar-row"><span>Inkoopkosten excl. BTW</span><span>${fE(kostenExcl)}</span></div>
         <div class="jaar-row"><span>Kilometervergoeding</span><span>${fE(kmVerg)}</span></div>
+        ${afschr ? `<div class="jaar-row"><span>Afschrijvingen (IB / Balans)</span><span>${fE(afschr)}</span></div>` : ''}
         <div class="jaar-row"><span>Totaal aftrekbare kosten</span><span>${fE(totKosten)}</span></div>
       </div>
       <div class="jaar-block">
@@ -2301,7 +2328,7 @@ function submitPrive(e){
   } else {
     priveBoekingen.push({id:Date.now(), date, type, bedrag, desc, ts:new Date().toISOString()});
   }
-  persistLocal();
+  persist();
   resetPriveForm();
   renderPriveTable();
   renderPriveSummary();
@@ -2325,7 +2352,7 @@ function deletePrive(id){
   const p = priveBoekingen.find(x=>x.id===id);
   confirmDelete(`"${p?.desc||'deze boeking'}" wordt permanent verwijderd.`, ()=>{
     priveBoekingen = priveBoekingen.filter(x=>x.id!==id);
-    persistLocal();
+    persist();
     renderPriveTable();
     renderPriveSummary();
     showToast('✅ Boeking verwijderd');
@@ -2423,7 +2450,7 @@ function submitAfschr(e){
   } else {
     afschrijvingen.push({id:Date.now(), desc, date, waarde, rest, termijn, cat, ts:new Date().toISOString()});
   }
-  persistLocal();
+  persist();
   resetAfschrForm();
   renderAfschrTable();
   renderBalans();
@@ -2449,7 +2476,7 @@ function deleteAfschr(id){
   const a = afschrijvingen.find(x=>x.id===id);
   confirmDelete(`"${a?.desc||'dit bedrijfsmiddel'}" wordt permanent verwijderd.`, ()=>{
     afschrijvingen = afschrijvingen.filter(x=>x.id!==id);
-    persistLocal();
+    persist();
     renderAfschrTable();
     renderBalans();
     showToast('✅ Bedrijfsmiddel verwijderd');
@@ -2477,7 +2504,7 @@ function renderAfschrTable(){
     const jaarAanschaf = parseInt(a.date.split('-')[0]);
     const jarenGebruikt = yr - jaarAanschaf;
     const jaarlijkseAfschr = (a.waarde - a.rest) / a.termijn;
-    const boekwaarde = Math.max(a.rest, a.waarde - (jarenGebruikt * jaarlijkseAfschr));
+    const boekwaarde = boekwaardeEind(a, yr);
     return `
     <tr>
       <td>${a.desc}</td>
@@ -2517,9 +2544,7 @@ function renderBalans(){
   const bedmidtotal = afschrijvingen.reduce((s,a)=>{
     const jaarAanschaf = parseInt(a.date.split('-')[0]);
     const jarenGebruikt = balYear - jaarAanschaf;
-    const jaarlijkseAfschr = (a.waarde - a.rest) / a.termijn;
-    const boekwaarde = Math.max(a.rest, a.waarde - (jarenGebruikt * jaarlijkseAfschr));
-    return s + boekwaarde;
+    return s + boekwaardeEind(a, balYear);
   }, 0);
   document.getElementById('b-bedmiddelen').textContent = fE(bedmidtotal);
   const bezit = (balData.voorraad||0) + (balData.vorder||0) + bedmidtotal;
@@ -2543,7 +2568,7 @@ function saveBalans(){
     credit: parseFloat(document.getElementById('b-credit').value)||0,
     belasting: parseFloat(document.getElementById('b-belasting').value)||0
   };
-  persistLocal();
+  persist();
   showToast('✅ Balans opgeslagen');
 }
 
@@ -2740,7 +2765,7 @@ async function handleFileUpload(e) {
   zone.innerHTML = `<div class="icon">📎</div><p><strong>${file.name}</strong></p>`;
 
   doUploadToDrive(file);
-  bonHerkennen(file); // gegevens van de bon automatisch invullen
+  if (!editingExpenseId) bonHerkennen(file); // gegevens van de bon automatisch invullen (niet bij bewerken)
 }
 
 function retryDriveUpload() {
