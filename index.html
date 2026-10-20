@@ -354,7 +354,8 @@ tr:hover td{background:#fafbff}
                 <option value="21">21%</option>
                 <option value="9">9%</option>
                 <option value="0">0%</option>
-                <option value="V21">Verlegd 21%</option>
+                <option value="V21EU">Verlegd 21% – binnen EU (Shopify, Meta)</option>
+                <option value="V21">Verlegd 21% – buiten EU (Claude)</option>
               </select>
             </div>
             <div class="form-group">
@@ -442,7 +443,8 @@ tr:hover td{background:#fafbff}
               <option value="21">21%</option>
               <option value="9">9%</option>
               <option value="0">0%</option>
-              <option value="V21">Verlegd 21%</option>
+              <option value="V21EU">Verlegd 21% – binnen EU (Shopify, Meta)</option>
+                <option value="V21">Verlegd 21% – buiten EU (Claude)</option>
             </select>
           </div>
           <div class="form-group">
@@ -1042,9 +1044,9 @@ function importNotionQ1(force){
     data.forEach(d=>{
       if(existing.has(d.notionId)) return;
       if(!d.incl) return;
-      const pctNum = d.btwPct==='V21' ? 0 : parseFloat(d.btwPct);
-      const excl = d.btwPct==='V21' ? d.incl : +(d.incl / (1 + pctNum/100)).toFixed(2);
-      const btwAmt = d.btwPct==='V21' ? 0 : +(d.incl - excl).toFixed(2);
+      const pctNum = isVerlegd(d.btwPct) ? 0 : parseFloat(d.btwPct);
+      const excl = isVerlegd(d.btwPct) ? d.incl : +(d.incl / (1 + pctNum/100)).toFixed(2);
+      const btwAmt = isVerlegd(d.btwPct) ? 0 : +(d.incl - excl).toFixed(2);
       expenses.push({
         id: Date.now() + added,
         notionId: d.notionId,
@@ -1138,13 +1140,16 @@ function updateStats(){
   document.getElementById('s-kmverg').textContent = fE(kmVergYr);
 }
 
+// Verlegde BTW: V21 = van buiten de EU (rubriek 4a), V21EU = van binnen de EU (rubriek 4b)
+function isVerlegd(p){ return p==='V21' || p==='V21EU'; }
+
 // ══════════════════════════════════════════
 //  BTW CALCULATION
 // ══════════════════════════════════════════
 function calcBTW(p){
   const excl = parseFloat(document.getElementById(p+'-excl').value)||0;
   const val  = document.getElementById(p+'-btwpct').value;
-  if(val==='V21'){
+  if(isVerlegd(val)){
     // Verlegd: je betaalt zelf geen BTW
     document.getElementById(p+'-btwamt').value = '';
     document.getElementById(p+'-incl').value   = excl ? excl.toFixed(2) : '';
@@ -1158,7 +1163,7 @@ function calcBTW(p){
 function calcFromIncl(p){
   const incl = parseFloat(document.getElementById(p+'-incl').value)||0;
   const val  = document.getElementById(p+'-btwpct').value;
-  if(val==='V21'){
+  if(isVerlegd(val)){
     // Verlegd: incl = excl (geen BTW betaald)
     document.getElementById(p+'-excl').value   = incl ? incl.toFixed(2) : '';
     document.getElementById(p+'-btwamt').value = '';
@@ -1324,7 +1329,7 @@ function renderKostenTable(){
       <td>${e.desc}</td>
       <td><span class="badge ${catClass(e.cat)}">${catLabel(e.cat)}</span></td>
       <td>${fE(e.excl)}</td>
-      <td>${e.btwPct==='V21'?'Verlegd 21':e.btwPct}%</td>
+      <td>${isVerlegd(e.btwPct)?'Verlegd 21':e.btwPct}%</td>
       <td>${fE(e.btwAmt)}</td>
       <td style="font-weight:700">${fE(e.incl)}</td>
       <td>${receiptLink(e)}</td>
@@ -1433,7 +1438,7 @@ function openDetail(id){
     <div class="detail-row"><span class="key">Datum</span><span class="val">${fD(e.date)}</span></div>
     <div class="detail-row"><span class="key">Categorie</span><span class="val">${catLabel(e.cat)}</span></div>
     <div class="detail-row"><span class="key">Excl. BTW</span><span class="val">${fE(e.excl)}</span></div>
-    <div class="detail-row"><span class="key">BTW (${e.btwPct==='V21'?'Verlegd 21':e.btwPct}%)</span><span class="val">${e.btwPct==='V21'?'verlegd':fE(e.btwAmt)}</span></div>
+    <div class="detail-row"><span class="key">BTW (${isVerlegd(e.btwPct)?'Verlegd 21':e.btwPct}%)</span><span class="val">${isVerlegd(e.btwPct)?'verlegd':fE(e.btwAmt)}</span></div>
     <div class="detail-row"><span class="key">Incl. BTW</span><span class="val">${fE(e.incl)}</span></div>
     ${e.driveLink?`<div class="detail-row"><span class="key">Bonnetje</span><span class="val"><a href="${e.driveLink}" target="_blank" style="color:#4f46e5;font-weight:600;text-decoration:none">📁 Openen in Drive</a></span></div>`:''}
     ${e.notionUrl?`<div class="detail-row"><span class="key">Notion</span><span class="val"><a href="${e.notionUrl}" target="_blank" style="color:#4f46e5;font-weight:600;text-decoration:none">📎 Openen in Notion</a></span></div>`:''}`;
@@ -1592,12 +1597,17 @@ function selectQ(q){
   const sh  = getQData(btwYear, q);
   const exp = expenses.filter(e=>getY(e.date)===btwYear&&getQ(e.date)===q);
   const vb  = exp.reduce((s,e)=>s+e.btwAmt,0);
-  // 4a: kosten uit landen buiten de EU (Shopify, Claude e.d.) – BTW verlegd naar jou
+  // 4a: diensten uit landen buiten de EU (Claude e.d.) – BTW verlegd naar jou
   const buitenEuExp = exp.filter(e=>e.btwPct==='V21');
   const buitenEuExcl = buitenEuExp.reduce((s,e)=>s+e.excl,0);
   const buitenEuBtw  = Math.round(buitenEuExcl * 21) / 100;
-  const verschuldigd = sh.btw + buitenEuBtw; // 1a btw + 4a btw
-  const voorbelasting = vb + buitenEuBtw;     // betaalde btw + 4a btw (mag je ook aftrekken)
+  // 4b: diensten uit EU-landen (Shopify, Meta e.d.) – BTW verlegd naar jou
+  const binnenEuExp = exp.filter(e=>e.btwPct==='V21EU');
+  const binnenEuExcl = binnenEuExp.reduce((s,e)=>s+e.excl,0);
+  const binnenEuBtw  = Math.round(binnenEuExcl * 21) / 100;
+  const verschuldigd = sh.btw + buitenEuBtw + binnenEuBtw; // 1a + 4a + 4b
+  const voorbelasting = vb + buitenEuBtw + binnenEuBtw;     // betaalde btw + verlegde btw (mag je ook aftrekken)
+  const verlegdCodes = [buitenEuExcl&&'4a', binnenEuExcl&&'4b'].filter(Boolean).map(c=>' + '+c).join('');
   const net = verschuldigd - voorbelasting;
   document.getElementById('btw-detail-label').textContent = `Q${q} ${QLABELS[q]} ${btwYear}`;
   // Render maandelijks invoer voor dit kwartaal
@@ -1612,6 +1622,7 @@ function selectQ(q){
   }).filter(r=>r.excl||r.btw);
   // 4a: kosten verlegd / buiten EU
   const breakdown4a = [...buitenEuExp].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const breakdown4b = [...binnenEuExp].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   // 5b: alle voorbelasting (kosten met BTW + verlegde BTW uit 4a)
   const breakdown5b_kosten = exp.filter(e=>e.btwAmt>0).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
 
@@ -1631,9 +1642,17 @@ function selectQ(q){
       <tfoot><tr><td colspan="2">Totaal</td><td class="num">${fE(buitenEuExcl)}</td><td class="num">${fE(buitenEuBtw)}</td></tr></tfoot>
     </table>`;
   };
+  const renderBreakdown4b = () => {
+    if(!breakdown4b.length) return `<div class="empty-mini">Geen kosten uit EU-landen in dit kwartaal.</div>`;
+    return `<table>
+      <thead><tr><th>Datum</th><th>Omschrijving</th><th class="num">Excl. BTW</th><th class="num">BTW 21%</th></tr></thead>
+      <tbody>${breakdown4b.map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''}</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(Math.round(e.excl*21)/100)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2">Totaal</td><td class="num">${fE(binnenEuExcl)}</td><td class="num">${fE(binnenEuBtw)}</td></tr></tfoot>
+    </table>`;
+  };
   const renderBreakdown5b = () => {
     const kostRows = breakdown5b_kosten.map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''}</td><td>${e.btwPct}%</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(e.btwAmt)}</td></tr>`).join('');
-    const verlegdRows = breakdown4a.map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''} <span style="color:#7c3aed;font-size:10px">(4a)</span></td><td>verlegd</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(Math.round(e.excl*21)/100)}</td></tr>`).join('');
+    const verlegdRows = [...breakdown4a, ...breakdown4b].map(e=>`<tr><td>${fD(e.date)}</td><td>${e.desc||''} <span style="color:#7c3aed;font-size:10px">(${e.btwPct==='V21EU'?'4b':'4a'})</span></td><td>verlegd</td><td class="num">${fE(e.excl)}</td><td class="num">${fE(Math.round(e.excl*21)/100)}</td></tr>`).join('');
     if(!kostRows && !verlegdRows) return `<div class="empty-mini">Geen aftrekbare BTW in dit kwartaal.</div>`;
     return `<table>
       <thead><tr><th>Datum</th><th>Omschrijving</th><th>BTW</th><th class="num">Excl. BTW</th><th class="num">BTW-bedrag</th></tr></thead>
@@ -1652,8 +1671,8 @@ function selectQ(q){
       <span class="tax">${dash(sh.btw)}</span>
     </div>
     <div class="btw-breakdown" id="btw-breakdown-1a" style="display:none">${renderBreakdown1a()}</div>
+    ${(buitenEuExcl || binnenEuExcl) ? `<div class="btw-section-header">4 – Prestaties uit het buitenland</div>` : ''}
     ${buitenEuExcl ? `
-    <div class="btw-section-header">4 – Prestaties uit het buitenland</div>
     <div class="btw-line clickable" id="btw-row-4a" onclick="toggleBtwBreakdown('4a')">
       <span class="code">4a</span>
       <span class="desc"><span class="chevron">▶</span>Leveringen/diensten uit landen buiten de EU</span>
@@ -1661,16 +1680,24 @@ function selectQ(q){
       <span class="tax">${dash(buitenEuBtw)}</span>
     </div>
     <div class="btw-breakdown" id="btw-breakdown-4a" style="display:none">${renderBreakdown4a()}</div>` : ''}
+    ${binnenEuExcl ? `
+    <div class="btw-line clickable" id="btw-row-4b" onclick="toggleBtwBreakdown('4b')">
+      <span class="code">4b</span>
+      <span class="desc"><span class="chevron">▶</span>Leveringen/diensten uit landen binnen de EU</span>
+      <span class="grondslag">${dash(binnenEuExcl)}</span>
+      <span class="tax">${dash(binnenEuBtw)}</span>
+    </div>
+    <div class="btw-breakdown" id="btw-breakdown-4b" style="display:none">${renderBreakdown4b()}</div>` : ''}
     <div class="btw-section-header">5 – Omzetbelasting</div>
     <div class="btw-line">
       <span class="code">5a</span>
-      <span class="desc">Verschuldigde omzetbelasting (1a${buitenEuExcl?' + 4a':''})</span>
+      <span class="desc">Verschuldigde omzetbelasting (1a${verlegdCodes})</span>
       <span class="grondslag"></span>
       <span class="tax">${dash(verschuldigd)}</span>
     </div>
     <div class="btw-line clickable" id="btw-row-5b" onclick="toggleBtwBreakdown('5b')">
       <span class="code">5b</span>
-      <span class="desc"><span class="chevron">▶</span>Voorbelasting (BTW op kosten${buitenEuExcl?' + 4a':''})</span>
+      <span class="desc"><span class="chevron">▶</span>Voorbelasting (BTW op kosten${verlegdCodes})</span>
       <span class="grondslag"></span>
       <span class="tax">${dash(voorbelasting)}</span>
     </div>
@@ -1848,7 +1875,7 @@ function renderJaar(){
 
   const kostenExcl= exp.reduce((s,e)=>s+e.excl,0);
   const vb        = exp.reduce((s,e)=>s+e.btwAmt,0);
-  const verlExclJr= exp.filter(e=>e.btwPct==='V21').reduce((s,e)=>s+e.excl,0);
+  const verlExclJr= exp.filter(e=>isVerlegd(e.btwPct)).reduce((s,e)=>s+e.excl,0);
   const verlBtwJr = Math.round(verlExclJr * 21) / 100;
   const kmVerg    = km.reduce((s,k)=>s+k.verg,0);
   const totKosten = kostenExcl+kmVerg;
@@ -1885,7 +1912,7 @@ function renderJaar(){
       <div class="jaar-block">
         <h3>🧾 BTW saldo</h3>
         <div class="jaar-row"><span>Verschuldigde BTW (5a)</span><span>${fE(shTotBTW + verlBtwJr)}</span></div>
-        ${verlBtwJr ? `<div class="jaar-row" style="font-size:12px;color:#718096"><span>&nbsp;&nbsp;waarvan verlegd (2a)</span><span>${fE(verlBtwJr)}</span></div>` : ''}
+        ${verlBtwJr ? `<div class="jaar-row" style="font-size:12px;color:#718096"><span>&nbsp;&nbsp;waarvan verlegd (4a/4b)</span><span>${fE(verlBtwJr)}</span></div>` : ''}
         <div class="jaar-row"><span>Voorbelasting (5b)</span><span>– ${fE(vb + verlBtwJr)}</span></div>
         <div class="jaar-row"><span class="${btwSaldo>0?'verlies':'winst'}">${btwSaldo>0?'Af te dragen':'Te ontvangen'}</span><span class="${btwSaldo>0?'verlies':'winst'}">${fE(Math.abs(btwSaldo))}</span></div>
       </div>
@@ -1917,7 +1944,7 @@ function genClaudeText(){
   const totVB = exp.reduce((s,e)=>s+e.btwAmt,0);
   const totKm = km.reduce((s,k)=>s+k.verg,0);
 
-  const kLines = exp.map((e,i)=>`  ${i+1}. ${fD(e.date)} | ${catLabel(e.cat)} | excl. ${fE(e.excl)} | BTW ${e.btwPct==='V21'?'Verlegd 21':e.btwPct}% (${e.btwPct==='V21'?'verlegd':fE(e.btwAmt)}) | incl. ${fE(e.incl)} | ${e.desc}`).join('\n')||'  (geen)';
+  const kLines = exp.map((e,i)=>`  ${i+1}. ${fD(e.date)} | ${catLabel(e.cat)} | excl. ${fE(e.excl)} | BTW ${isVerlegd(e.btwPct)?'Verlegd 21':e.btwPct}% (${isVerlegd(e.btwPct)?'verlegd':fE(e.btwAmt)}) | incl. ${fE(e.incl)} | ${e.desc}`).join('\n')||'  (geen)';
   const mLines = km.map((k,i) =>`  ${i+1}. ${fD(k.date)} | ${k.van} → ${k.naar} | ${k.totalKm.toFixed(1)} km | ${fE(k.verg)}`).join('\n')||'  (geen)';
 
   const text=`Hoi Claude! Hieronder mijn administratie. Kun jij controleren of alles klopt?
@@ -2009,13 +2036,13 @@ function submitAbo(e){
   const btwAmtVal = parseFloat(document.getElementById('abo-btwamt').value)||0;
   // Als alleen excl is ingevuld, bereken incl
   if(!bedrag && exclVal){
-    const p = btwpct==='V21'?0:parseFloat(btwpct)||0;
+    const p = isVerlegd(btwpct)?0:parseFloat(btwpct)||0;
     bedrag = +(exclVal*(1+p/100)).toFixed(2);
   }
   // Als alleen incl is ingevuld, bereken excl
   if(bedrag && !exclVal){
-    const p = btwpct==='V21'?0:parseFloat(btwpct)||0;
-    exclVal = btwpct==='V21' ? bedrag : +(bedrag/(1+p/100)).toFixed(2);
+    const p = isVerlegd(btwpct)?0:parseFloat(btwpct)||0;
+    exclVal = isVerlegd(btwpct) ? bedrag : +(bedrag/(1+p/100)).toFixed(2);
   }
   const cat = document.getElementById('abo-cat').value;
   const freq = document.getElementById('abo-freq').value;
@@ -2034,9 +2061,9 @@ function submitAbo(e){
       e.desc = naam + ' (abo)';
       e.cat = cat;
       e.incl = bedrag;
-      const pctNum = btwpct==='V21' ? 0 : parseFloat(btwpct);
-      e.excl = btwpct==='V21' ? bedrag : +(bedrag/(1+pctNum/100)).toFixed(2);
-      e.btwAmt = btwpct==='V21' ? 0 : +(bedrag-e.excl).toFixed(2);
+      const pctNum = isVerlegd(btwpct) ? 0 : parseFloat(btwpct);
+      e.excl = isVerlegd(btwpct) ? bedrag : +(bedrag/(1+pctNum/100)).toFixed(2);
+      e.btwAmt = isVerlegd(btwpct) ? 0 : +(bedrag-e.excl).toFixed(2);
       e.btwPct = btwpct;
     });
     editingAboId = null;
@@ -2155,7 +2182,7 @@ function renderAboTable(){
     return `<tr>
       <td><strong>${a.naam}</strong>${a.note?'<br><span style="font-size:11px;color:#718096">'+a.note+'</span>':''}</td>
       <td>${fE(a.excl||0)}</td>
-      <td>${a.btwpct==='V21'?'Verlegd 21%':fE(a.btwAmt||0)+' ('+a.btwpct+'%)'}</td>
+      <td>${isVerlegd(a.btwpct)?'Verlegd 21%':fE(a.btwAmt||0)+' ('+a.btwpct+'%)'}</td>
       <td style="font-weight:600">${fE(a.bedrag)}</td>
       <td><span class="badge ${catClass(a.cat)}">${catLabel(a.cat)}</span></td>
       <td>${a.freq==='maandelijks'?'Per maand':a.freq==='kwartaal'?'Per kwartaal':'Per jaar'}</td>
@@ -2186,9 +2213,9 @@ function generateForAbo(aboId){
 
   function makeExpense(dateStr){
     const incl = abo.bedrag || 0;
-    const pctNum = abo.btwpct==='V21' ? 0 : parseFloat(abo.btwpct);
-    const excl = abo.excl || (abo.btwpct==='V21' ? incl : +(incl/(1+pctNum/100)).toFixed(2));
-    const btwAmt = abo.btwAmt || (abo.btwpct==='V21' ? 0 : +(incl-excl).toFixed(2));
+    const pctNum = isVerlegd(abo.btwpct) ? 0 : parseFloat(abo.btwpct);
+    const excl = abo.excl || (isVerlegd(abo.btwpct) ? incl : +(incl/(1+pctNum/100)).toFixed(2));
+    const btwAmt = abo.btwAmt || (isVerlegd(abo.btwpct) ? 0 : +(incl-excl).toFixed(2));
     return {
       id: Date.now() + Math.random()*1000|0,
       date: dateStr, desc: abo.naam + ' (abo)', cat: abo.cat,
@@ -2819,8 +2846,9 @@ const OCR_TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tess
 // Bekende leveranciers → nette naam, categorie en (soms) BTW-soort
 const OCR_VENDORS = [
   { re: /mollie/i,                   name: 'Mollie',              cat: 'software' },
-  { re: /shopify/i,                  name: 'Shopify',             cat: 'software', btw: 'V21' },
-  { re: /anthropic/i,                name: 'Anthropic',           cat: 'software' },
+  { re: /shopify/i,                  name: 'Shopify',             cat: 'software', btw: 'V21EU' },
+  { re: /meta platforms|facebook/i,  name: 'Meta',                cat: 'marketing', btw: 'V21EU' },
+  { re: /anthropic/i,                name: 'Anthropic',           cat: 'software', btw: 'V21' },
   { re: /canva/i,                    name: 'Canva',               cat: 'software' },
   { re: /myparcel/i,                 name: 'MyParcel',            cat: 'verpakking' },
   { re: /verzendsimpel/i,            name: 'Verzendsimpel',       cat: 'verpakking' },
@@ -2969,6 +2997,13 @@ function ocrParseDate(text) {
   return find(text);
 }
 
+// Verlegd van binnen of buiten de EU? Kijkt naar landen op de factuur (jouw eigen "Netherlands" telt niet mee)
+function ocrVerlegdSoort(text) {
+  if (/united states|\busa\b|verenigde staten|united kingdom|\buk\b|verenigd koninkrijk|china|hong kong|singapore|canada|australi|switzerland|zwitserland|norway|noorwegen|israel|turkey|turkije/i.test(text)) return 'V21';
+  if (/ireland|ierland|germany|duitsland|deutschland|belgi[eëu]|france|frankrijk|luxemb|spain|spanje|espa[nñ]a|ital|sweden|zweden|denmark|denemarken|austria|oostenrijk|poland|polen|portugal|finland|czech|tsjechi|estonia|estland|lithuania|latvia|malta|cyprus|greece|griekenland/i.test(text)) return 'V21EU';
+  return 'V21';
+}
+
 function ocrAnalyse(text, fileName) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const all = text.toLowerCase();
@@ -3003,7 +3038,9 @@ function ocrAnalyse(text, fileName) {
   // ── BTW-percentage ──
   const vendor = OCR_VENDORS.find(v => v.re.test(text));
   let pct = null;
-  if (/verlegd|reverse[- ]charge|btw verlegd/i.test(text)) pct = 'V21';
+  if (/verleg|reverse[- ]?charge|accounted for by the (recipient|customer)|autoliquidation|steuerschuldnerschaft/i.test(text)) {
+    pct = vendor && vendor.btw ? vendor.btw : ocrVerlegdSoort(text);
+  }
   else {
     const m = all.match(/(?:btw|vat|tax)[^\n%]{0,25}?\b(21|9|0)(?:[.,]0+)?\s?%|\b(21|9|0)(?:[.,]0+)?\s?%\s*(?:btw|vat|tax)/);
     if (m) pct = m[1] || m[2];
@@ -3020,12 +3057,12 @@ function ocrAnalyse(text, fileName) {
   }
   if (!pct && vendor && vendor.btw) pct = vendor.btw;
   if (incl != null && excl == null) {          // alleen totaal bekend → terugrekenen met percentage
-    const p = pct === 'V21' ? 0 : parseFloat(pct || '21');
+    const p = isVerlegd(pct) ? 0 : parseFloat(pct || '21');
     excl = +(incl / (1 + p / 100)).toFixed(2);
     btw  = +(incl - excl).toFixed(2);
     if (!pct) pct = '21';
   }
-  Object.assign(res, { incl, excl, btw: pct === 'V21' ? null : btw, pct });
+  Object.assign(res, { incl, excl, btw: isVerlegd(pct) ? null : btw, pct });
 
   // ── Omschrijving: "Leverancier - factuur: 12345" (zoals je ze al schrijft) ──
   let name = vendor && vendor.name;
@@ -3034,7 +3071,7 @@ function ocrAnalyse(text, fileName) {
       !/(factuur|invoice|receipt|kassabon|bon\b|datum|date|pagina|page|tel|www\.|http|@)/i.test(l));
   }
   const invText = text.replace(/\s*\u0000\s*/g, '-');
-  const inv = [...invText.matchAll(/(?:factuurnummer|factuur\s*(?:nr|nummer)\.?|invoice\s*(?:number|no\.?|nr\.?|#)|receipt\s*(?:number|no\.?|#)|bonnummer|ordernummer|order\s*(?:number|no\.?|#))\s*[:#]?\s*([A-Z0-9][A-Z0-9.\-\/]{3,})/gi)].find(m => /\d/.test(m[1]));
+  const inv = [...invText.matchAll(/(?:factuurnummer|factuur\s*(?:nr|nummer)\.?|factuur\s*#|bill\s*#|invoice\s*(?:number|no\.?|nr\.?|#)|receipt\s*(?:number|no\.?|#)|bonnummer|ordernummer|order\s*(?:number|no\.?|#))\s*[:#]?\s*([A-Z0-9][A-Z0-9.\-\/]{3,})/gi)].find(m => /\d/.test(m[1]));
   const MAANDEN = ['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'];
   const periode = res.date ? MAANDEN[+res.date.slice(5, 7) - 1] + ' ' + res.date.slice(0, 4) : null;
   res.desc = [name, inv ? 'factuur: ' + inv[1] : periode].filter(Boolean).join(' - ') ||
