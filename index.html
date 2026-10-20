@@ -1964,7 +1964,7 @@ function saveSettings(){
   const newClientId = document.getElementById('s-drive-id').value.trim();
   if (newClientId !== settings.driveClientId) {
     settings.driveClientId = newClientId;
-    driveConnected = false; driveAccessToken = null;
+    driveConnected = false; driveAccessToken = null; driveTokenExpiresAt = 0;
     if (newClientId) { initDriveClient(); } else { updateDriveStatusBar('disconnected'); }
   }
   if(settings.naam) document.getElementById('header-business').textContent=settings.naam;
@@ -2536,7 +2536,9 @@ function showApp() {
 function showLoginButton() {
   const loading = document.getElementById('login-loading');
   const hint    = document.getElementById('login-hint');
+  const btn     = document.getElementById('login-btn');
   if (loading) loading.style.display = 'none';
+  if (btn)     btn.style.display = '';
   if (hint)  { hint.style.display = 'block'; hint.textContent = 'Log in met bybiancagoedhart@gmail.com'; }
 }
 
@@ -2545,7 +2547,13 @@ function showLoginButton() {
 // ══════════════════════════════════════════
 let driveTokenClient = null;
 let driveAccessToken = null;
+let driveTokenExpiresAt = 0;   // Google-tokens verlopen na ~1 uur
 let driveConnected   = false;
+let driveAppShown    = false;
+let driveTokenWaiters = [];    // wachten op een (nieuw) token
+let driveTokenRequestPending = false;
+let driveExpiryTimer = null;
+let driveSaveFailed  = false;
 let pendingFileForUpload = null; // file waiting to be uploaded after auth
 let driveManualConnect = false; // true = user clicked "Verbinden" manually
 
@@ -2557,29 +2565,74 @@ function initDriveClient() {
     client_id: clientId,
     scope: 'https://www.googleapis.com/auth/drive.file',
     callback: onDriveToken,
-    error_callback: () => { showLoginButton(); },
+    error_callback: onDriveTokenError,
   });
   showLoginButton(); // altijd direct de knop tonen
 }
 
 function onDriveToken(resp) {
-  if (resp.error) {
-    // Silent auto-connect failed → show login button
-    showLoginButton();
-    driveManualConnect = false;
-    return;
-  }
+  driveTokenRequestPending = false;
+  if (resp.error) { onDriveTokenError(resp); return; }
   driveAccessToken = resp.access_token;
+  driveTokenExpiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
   driveConnected = true;
+  clearTimeout(driveExpiryTimer);
+  driveExpiryTimer = setTimeout(() => updateDriveStatusBar('expired'), driveTokenExpiresAt - Date.now());
   updateDriveStatusBar('connected');
-  showApp(); // hide login screen, reveal the app
+  if (!driveAppShown) { driveAppShown = true; showApp(); } // hide login screen, reveal the app
   driveManualConnect = false;
-  // If a file was waiting, upload it now
-  if (pendingFileForUpload) {
-    const f = pendingFileForUpload;
-    pendingFileForUpload = null;
-    doUploadToDrive(f);
+  const waiters = driveTokenWaiters; driveTokenWaiters = [];
+  waiters.forEach(w => w.resolve(driveAccessToken));
+}
+
+function onDriveTokenError() {
+  driveTokenRequestPending = false;
+  driveManualConnect = false;
+  if (!driveAppShown) showLoginButton(); // inloggen mislukt → knop weer tonen
+  else updateDriveStatusBar('expired');  // vernieuwen mislukt (bv. popup geblokkeerd)
+  const waiters = driveTokenWaiters; driveTokenWaiters = [];
+  waiters.forEach(w => w.reject(new Error('DRIVE_AUTH')));
+}
+
+function driveTokenValid() {
+  return !!driveAccessToken && Date.now() < driveTokenExpiresAt - 60000;
+}
+
+// Geeft een geldig token; vraagt zo nodig een nieuw token aan bij Google.
+// De aanvraag gebeurt synchroon, zodat hij binnen een klik valt (anders blokkeert de browser de popup).
+function ensureDriveToken(forceRefresh) {
+  if (!forceRefresh && driveTokenValid()) return Promise.resolve(driveAccessToken);
+  if (!driveTokenClient) return Promise.reject(new Error('DRIVE_AUTH'));
+  return new Promise((resolve, reject) => {
+    driveTokenWaiters.push({ resolve, reject });
+    if (!driveTokenRequestPending) {
+      driveTokenRequestPending = true;
+      driveTokenClient.requestAccessToken({ prompt: '', login_hint: 'bybiancagoedhart@gmail.com' });
+    }
+  });
+}
+
+// fetch naar Google Drive met een geldig token; bij 401 één keer vernieuwen en opnieuw proberen
+async function driveFetch(url, opts = {}) {
+  const send = token => fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } });
+  let res = await send(await ensureDriveToken());
+  if (res.status === 401) {
+    driveTokenExpiresAt = 0;
+    res = await send(await ensureDriveToken(true));
   }
+  return res;
+}
+
+// Klik op "verlopen" → opnieuw verbinden en wat bleef liggen alsnog doen
+function reconnectDrive() {
+  ensureDriveToken(true).then(() => {
+    showToast('☁️ Drive weer verbonden');
+    if (driveSaveFailed) doSaveToDrive();
+  }).catch(() => showToast('⚠️ Verbinden met Drive mislukt'));
+}
+
+function driveAuthRetryHtml(fn) {
+  return `⚠️ Drive-sessie verlopen. <button type="button" class="btn btn-primary" style="padding:4px 10px;font-size:12px;margin-left:6px" onclick="${fn}()">🔄 Opnieuw verbinden &amp; uploaden</button>`;
 }
 
 function connectDrive() {
@@ -2605,7 +2658,10 @@ function updateDriveStatusBar(state) {
   const bar = document.getElementById('drive-status-bar');
   if (bar) {
     if (state === 'connected') { bar.textContent = '✅ verbonden'; bar.style.color = '#059669'; }
+    else if (state === 'expired') { bar.textContent = '⚠️ verlopen – klik om te verbinden'; bar.style.color = '#d97706'; }
     else { bar.textContent = '⚠️ niet verbonden'; bar.style.color = '#d97706'; }
+    bar.style.cursor = state === 'expired' ? 'pointer' : '';
+    bar.onclick = state === 'expired' ? reconnectDrive : null;
   }
   // Header status badge
   const hdr = document.getElementById('drive-status');
@@ -2613,10 +2669,15 @@ function updateDriveStatusBar(state) {
     if (state === 'connected') {
       hdr.textContent = '☁️ Drive verbonden';
       hdr.style.background = 'rgba(16,185,129,.25)';
+    } else if (state === 'expired') {
+      hdr.textContent = '⚠️ Drive verlopen – klik';
+      hdr.style.background = 'rgba(245,158,11,.35)';
     } else {
       hdr.textContent = '☁️ niet verbonden';
       hdr.style.background = 'rgba(255,255,255,.15)';
     }
+    hdr.style.cursor = state === 'expired' ? 'pointer' : '';
+    hdr.onclick = state === 'expired' ? reconnectDrive : null;
   }
 }
 
@@ -2628,14 +2689,12 @@ async function handleFileUpload(e) {
   zone.classList.add('has-file');
   zone.innerHTML = `<div class="icon">📎</div><p><strong>${file.name}</strong></p>`;
 
-  if (!driveConnected) {
-    // Token expired — silently refresh, then upload
-    pendingFileForUpload = file;
-    if (driveTokenClient) driveTokenClient.requestAccessToken({ prompt: 'none' });
-    else showToast('⚠️ Drive niet verbonden, herlaad de pagina');
-    return;
-  }
   doUploadToDrive(file);
+}
+
+function retryDriveUpload() {
+  const f = pendingFileForUpload; pendingFileForUpload = null;
+  if (f) doUploadToDrive(f);
 }
 
 async function doUploadToDrive(file) {
@@ -2676,7 +2735,12 @@ async function doUploadToDrive(file) {
     showToast('📁 Bonnetje staat in Drive!');
   } catch(err) {
     console.error(err);
-    statText.textContent = '❌ Upload mislukt: ' + err.message;
+    if (err.message === 'DRIVE_AUTH') {
+      pendingFileForUpload = file;
+      statText.innerHTML = driveAuthRetryHtml('retryDriveUpload');
+    } else {
+      statText.textContent = '❌ Upload mislukt: ' + err.message;
+    }
     zone.classList.remove('uploading');
     showToast('❌ Upload naar Drive mislukt');
   }
@@ -2689,13 +2753,11 @@ async function handleAboFileUpload(e) {
   const zone = document.getElementById('abo-zone');
   zone.classList.add('has-file');
   zone.innerHTML = `<div class="icon">📎</div><p><strong>${file.name}</strong></p>`;
-  if (!driveConnected) {
-    pendingAboFile = file;
-    if (driveTokenClient) driveTokenClient.requestAccessToken({ prompt: 'none' });
-    else showToast('⚠️ Drive niet verbonden, herlaad de pagina');
-    return;
-  }
   doAboUploadToDrive(file);
+}
+function retryAboDriveUpload() {
+  const f = pendingAboFile; pendingAboFile = null;
+  if (f) doAboUploadToDrive(f);
 }
 async function doAboUploadToDrive(file) {
   const prog     = document.getElementById('abo-upload-progress');
@@ -2728,7 +2790,12 @@ async function doAboUploadToDrive(file) {
     showToast('📁 Bestand staat in Drive!');
   } catch(err) {
     console.error(err);
-    statText.textContent = '❌ Upload mislukt: ' + err.message;
+    if (err.message === 'DRIVE_AUTH') {
+      pendingAboFile = file;
+      statText.innerHTML = driveAuthRetryHtml('retryAboDriveUpload');
+    } else {
+      statText.textContent = '❌ Upload mislukt: ' + err.message;
+    }
     zone.classList.remove('uploading');
     showToast('❌ Upload naar Drive mislukt');
   }
@@ -2737,20 +2804,20 @@ async function doAboUploadToDrive(file) {
 async function findOrCreateFolder(name, parentId = null) {
   let q = `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   if (parentId) q += ` and '${parentId}' in parents`;
-  const res  = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`, {
-    headers: { Authorization: `Bearer ${driveAccessToken}` }
-  });
+  const res  = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`);
   const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
   if (data.files && data.files.length > 0) return data.files[0].id;
   // Create folder
   const body = { name, mimeType: 'application/vnd.google-apps.folder' };
   if (parentId) body.parents = [parentId];
-  const cr = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+  const cr = await driveFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${driveAccessToken}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
   const folder = await cr.json();
+  if (!folder.id) throw new Error(JSON.stringify(folder));
   return folder.id;
 }
 
@@ -2759,9 +2826,8 @@ async function uploadFile(file, folderId) {
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
   form.append('file', file);
-  const res  = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+  const res  = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${driveAccessToken}` },
     body: form
   });
   const data = await res.json();
@@ -2770,9 +2836,9 @@ async function uploadFile(file, folderId) {
 }
 
 async function makeShareable(fileId) {
-  await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+  await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${driveAccessToken}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ role: 'reader', type: 'anyone' })
   });
 }
@@ -2804,9 +2870,9 @@ async function loadFromDrive(){
     // Zoek bestand als we het ID nog niet hebben
     if(!driveDataFileId){
       const q   = encodeURIComponent("name='admin_data.json' and trashed=false");
-      const res = await fetch(
+      const res = await driveFetch(
         `https://www.googleapis.com/drive/v3/files?spaces=drive&q=${q}&fields=files(id)`,
-        { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+        {}
       );
       const list = await res.json();
       if(list.files?.length) {
@@ -2816,9 +2882,9 @@ async function loadFromDrive(){
     }
     if(!driveDataFileId){ showDriveStatus(''); return; } // nog geen bestand → eerste gebruik
     // Download data
-    const dataRes = await fetch(
+    const dataRes = await driveFetch(
       `https://www.googleapis.com/drive/v3/files/${driveDataFileId}?alt=media`,
-      { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+      {}
     );
     if(!dataRes.ok){ showDriveStatus(''); return; }
     const data = await dataRes.json();
@@ -2858,6 +2924,7 @@ async function loadFromDrive(){
 // Sla data op in Drive (debounced 2 sec)
 function scheduleDriveSave(){
   if(!driveAccessToken) return;
+  if(!driveTokenValid()) ensureDriveToken().catch(()=>{}); // nu vernieuwen, nog binnen de klik
   clearTimeout(driveSaveTimer);
   driveSaveTimer = setTimeout(doSaveToDrive, 2000);
 }
@@ -2876,23 +2943,26 @@ async function doSaveToDrive(){
       ? `https://www.googleapis.com/upload/drive/v3/files/${driveDataFileId}?uploadType=multipart`
       : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
     const method = driveDataFileId ? 'PATCH' : 'POST';
-    const res    = await fetch(url, {
+    const res    = await driveFetch(url, {
       method,
-      headers: { Authorization:`Bearer ${driveAccessToken}`,
-                 'Content-Type':`multipart/related; boundary=${boundary}` },
+      headers: { 'Content-Type':`multipart/related; boundary=${boundary}` },
       body
     });
     const result = await res.json();
+    if(!res.ok) throw new Error(JSON.stringify(result));
     if(result.id){
       driveDataFileId = result.id;
       localStorage.setItem('adm_dfid', driveDataFileId);
       localStorage.setItem('adm_ts', Date.now());
     }
+    driveSaveFailed = false;
     showDriveStatus('☁️ Opgeslagen');
     setTimeout(()=>showDriveStatus(''),2500);
   } catch(e){
     console.warn('Drive opslaan mislukt:',e);
+    driveSaveFailed = true;
     showDriveStatus('');
+    if(e.message !== 'DRIVE_AUTH') showToast('⚠️ Opslaan in Drive mislukt (lokaal wel opgeslagen)');
   }
 }
 
@@ -2922,18 +2992,18 @@ async function exportFromDrive(){
     // Zoek het bestand als we het ID nog niet hebben
     if(!driveDataFileId){
       const q   = encodeURIComponent("name='admin_data.json' and trashed=false");
-      const res = await fetch(
+      const res = await driveFetch(
         `https://www.googleapis.com/drive/v3/files?spaces=drive&q=${q}&fields=files(id,name)`,
-        { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+        {}
       );
       const list = await res.json();
       if(list.files?.length){ driveDataFileId = list.files[0].id; localStorage.setItem('adm_dfid', driveDataFileId); }
     }
     if(!driveDataFileId){ setStatus('⚠️ Geen admin_data.json gevonden in Drive.', '#b45309'); return; }
 
-    const dataRes = await fetch(
+    const dataRes = await driveFetch(
       `https://www.googleapis.com/drive/v3/files/${driveDataFileId}?alt=media`,
-      { headers: { Authorization: `Bearer ${driveAccessToken}` } }
+      {}
     );
     if(!dataRes.ok){ setStatus('❌ Download mislukt: ' + dataRes.status, '#dc2626'); return; }
     const json = await dataRes.text();
@@ -3002,8 +3072,7 @@ function showDriveStatus(txt){
     el.style.background = 'rgba(16,185,129,.25)';
   } else {
     // Geen tekst = terug naar standaard status
-    el.textContent = driveConnected ? '☁️ Drive verbonden' : '☁️ niet verbonden';
-    el.style.background = driveConnected ? 'rgba(16,185,129,.25)' : 'rgba(255,255,255,.15)';
+    updateDriveStatusBar(!driveConnected ? 'disconnected' : driveTokenValid() ? 'connected' : 'expired');
   }
 }
 
