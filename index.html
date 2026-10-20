@@ -368,7 +368,7 @@ tr:hover td{background:#fafbff}
             </div>
           </div>
 
-          <div class="form-group full">
+          <div class="form-group full" id="k-btwq-group" style="display:none">
             <label>🧾 BTW meenemen in aangifte</label>
             <select id="k-btwq"><option value="">Kwartaal van de datum (normaal)</option></select>
             <p style="font-size:11px;color:#a0aec0;margin-top:3px">Alleen aanpassen voor een vergeten factuur uit een kwartaal dat je al hebt aangegeven.</p>
@@ -1247,6 +1247,7 @@ function resetKostForm(){
   if(btn){ btn.textContent = '✅ Opslaan'; btn.style.background = ''; }
   document.getElementById('kosten-form').reset();
   document.getElementById('k-date').value = today();
+  updateBtwQOptions('');
   document.getElementById('k-drive-url').value = '';
   document.getElementById('drive-file-result').style.display = 'none';
   document.getElementById('upload-progress').style.display = 'none';
@@ -1478,7 +1479,7 @@ function editExpense(id){
   document.getElementById('k-cat').value = e.cat;
   document.getElementById('k-desc').value = e.desc;
   document.getElementById('k-btwpct').value = e.btwPct;
-  document.getElementById('k-btwq').value = e.btwQ || '';
+  updateBtwQOptions(e.btwQ || '');
   document.getElementById('k-excl').value = e.excl ? e.excl.toFixed(2) : '';
   document.getElementById('k-btwamt').value = e.btwAmt ? e.btwAmt.toFixed(2) : '';
   document.getElementById('k-incl').value = e.incl ? e.incl.toFixed(2) : '';
@@ -3457,10 +3458,27 @@ waitForGIS();
 //  INIT
 // ══════════════════════════════════════════
 document.getElementById('k-date').value   = today();
-(function fillBtwQ(){
-  const sel = document.getElementById('k-btwq'), y = curY();
-  [y-1, y, y+1].forEach(yy => [1,2,3,4].forEach(q => sel.add(new Option(`Q${q} ${yy}`, `${yy}-Q${q}`))));
-})();
+// Alleen kwartalen ná de datum t/m het huidige kwartaal; veld verbergen als de datum in het huidige kwartaal valt
+function updateBtwQOptions(keep){
+  const sel = document.getElementById('k-btwq');
+  const d = document.getElementById('k-date').value;
+  const want = keep !== undefined ? keep : sel.value;
+  sel.length = 1;
+  if (d) {
+    let y = getY(d), q = getQ(d);
+    const cy = curY(), cq = curQ();
+    while (true) {
+      q++; if (q > 4) { q = 1; y++; }
+      if (y > cy || (y === cy && q > cq)) break;
+      sel.add(new Option(`Q${q} ${y}`, `${y}-Q${q}`));
+    }
+  }
+  if (want && ![...sel.options].some(o => o.value === want)) sel.add(new Option(btwQLabel(want), want)); // bestaande keuze altijd tonen
+  sel.value = want || '';
+  document.getElementById('k-btwq-group').style.display = sel.length > 1 ? '' : 'none';
+}
+document.getElementById('k-date').addEventListener('change', () => updateBtwQOptions());
+updateBtwQOptions();
 document.getElementById('km-date').value  = today();
 document.getElementById('inv-date').value = today();
 document.getElementById('inv-num').value  = `${curY()}-${String(invCounter).padStart(3,'0')}`;
